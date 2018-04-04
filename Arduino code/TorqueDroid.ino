@@ -1,7 +1,7 @@
 #include <String.h>
+//#include <Wire.h>
 
 // #define DEBUG  // zakomentować w gotowym projekcie
-// #define RandomDebug  // randomuje wartości w funkcji get sensor
 #define BT Serial1
 
 
@@ -31,8 +31,6 @@ const String DIGITAL = "d";
 const String IS_INPUT = "i";
 const String IS_OUTPUT = "o";
 
-String fromTorque = "";
-
 const String INI0 = "0100";
 const String INI2 = "0120";
 const String INI4 = "0140";
@@ -41,8 +39,11 @@ const String INI8 = "0180";
 const String RPM = "010C";
 const String PREDKOSC = "010D";
 const String THROTTLE = "0111";
+const String BRAKE = "0113"; // brake as oxygen sensor
+const String GEAR = "010F"; // gear as Intake temp
+const String VTEC = "0105"; // gear as cooland temp
 
-
+String fromTorque = "";
 
 // *********************************************************************
 //                definicje pinów
@@ -51,8 +52,9 @@ const String THROTTLE = "0111";
 #define ShaftSensor            3
 #define clutch                 7
 #define brakePin               8
-#define VTECPin               13
-#define ThrottlePin           A7
+#define flashToPassPin        14
+#define VTECPin               16
+#define ThrottlePin           A0
 
 // *********************************************************************
 //                aliasowanie stałych wartości
@@ -67,13 +69,13 @@ const String THROTTLE = "0111";
 #define wspgear4  53
 #define wspgear5  43
 
-
 // *********************************************************************
 //                        globalne zmienne
 // *********************************************************************
 boolean brake;
 volatile unsigned long speed = 0, rpm = 0;
-byte gear = 0, throttlePos = 0, minThrottlePos = 255;
+volatile byte minThrottlePos = 255, impulsSpeedCounter;
+byte gear = 0, throttlePos = 0;
 
 float gearRatio[6] = {
   5.5,        // FD
@@ -91,6 +93,17 @@ float gearRatio[6] = {
 // *********************************************************************
 //                definicje czujników
 // *********************************************************************
+/**
+   Array of sensors we will advertise to Torque so it can automatically import them. Using strings
+   Stucture is:
+
+    Arduino Pin, Arduino pin type, Input/Ouput, Default value(if output), ShortName, Long name, units, minimum value, maximum value
+
+    Caveats:  Don't use a '>' in any of the names,
+              Update 'sensorsSize' with the number of elements.
+              Analog outputs are PWM on digital pins.
+
+*/
 const int SENSORSSIZE = 9 * 6; // each line is 9 attributes, and we have 3 lines.
 const String sensors[SENSORSSIZE] = {
   "0", ANALOG,   IS_INPUT,    "0",   "VSS",      "Speed",       "km/h",    "0", "200",
@@ -98,15 +111,15 @@ const String sensors[SENSORSSIZE] = {
   "2", ANALOG,   IS_INPUT,    "0",   "Throttle", "TPS",         "%",       "0", "100",
   "3", ANALOG,   IS_INPUT,    "0",   "Gear",     "GearPos",     " ",       "0", "6",
   "8", DIGITAL,  IS_INPUT,    "0",   "Brake",    "Brake",       "bit",     "0", "1",
-  "13", DIGITAL, IS_INPUT,    "0",   "VTEC",     "VTEC",        "bit",     "0", "1"
+  "13", DIGITAL,  IS_INPUT,    "0",   "VTEC",     "VTEC",        "bit",     "0", "1"
 };
 /**
-  Configuration directives for the app to hide various things. Comma separated. Remove to enable visibility in Torque
-  - handy if your project isn't car related or you want to make sensor selections relatively easy.
+   Configuration directives for the app to hide various things. Comma separated. Remove to enable visibility in Torque
+    - handy if your project isn't car related or you want to make sensor selections relatively easy.
 
-  Supported types:
-  NO_CAR_SENSORS  - hide any car related sensors
-  NO_DEVICE_SENSORS - hide any device (phone) sensors
+    Supported types:
+      NO_CAR_SENSORS  - hide any car related sensors
+      NO_DEVICE_SENSORS - hide any device (phone) sensors
 
 */
 const String CONFIGURATION = "";
@@ -116,21 +129,24 @@ const String CONFIGURATION = "";
 //                                SETUP
 // *********************************************************************
 void setup() {
-  // Init the pins
-  initSensors();
+  //  display.begin(SSD1306_SWITCHCAPVCC, 0x3C);  // initialize with the I2C addr 0x3D (for the 128x64)
+  BT.begin(115200);  // BT.connenct
 
 #ifdef DEBUG
   Serial.begin(115200);
-  delay(1500);
   Serial.println("Setup Start");
 #endif
-
-  BT.begin(115200);  // BT.connenct
+#ifndef DEBUG
+  delay(3000);
+#endif
+  // Init the pins
+  initSensors();
 
   pinMode(SpeedSensor, INPUT);
   pinMode(ShaftSensor, INPUT);
   pinMode(clutch, INPUT);
   pinMode(brakePin, INPUT);
+  pinMode(flashToPassPin, OUTPUT);
   pinMode(VTECPin, INPUT);
   pinMode(ThrottlePin, INPUT);
 
@@ -157,19 +173,15 @@ void loop() {
       fromTorque += c;
     }
   }
-
-
-
-  //  wrzucNaLcd();
 }
 
 /**
-  Parse the commands sent from Torque
+   Parse the commands sent from Torque
 */
 void processCommand(String command) {
 #ifdef DEBUG
   // Debug - see what torque is sending on your serial monitor
-  Serial.println(command);
+  //Serial.println(command);
 #endif
 
   // Simple command processing from the app to the arduino..
@@ -226,12 +238,6 @@ void processCommand(String command) {
     BT.print("41 80 00 20 00 00");
   }
   else if (command.startsWith(RPM)) {
-#ifdef DEBUG
-    //  rpm = random(0, 9000);
-    Serial.print("RPM: ");
-    Serial.print(String(rpm, HEX) + " : ");
-    Serial.println(rpm);
-#endif
     BT.print(RPM);
     BT.print("41 0C ");
     BT.print(IntNaChar(rpm * 4, 'H'), HEX);
@@ -239,33 +245,38 @@ void processCommand(String command) {
     BT.print(IntNaChar(rpm * 4, 'L'), HEX);
   }
   else if (command.startsWith(PREDKOSC)) {
-#ifdef DEBUG
-    //   speed = random(0, 200);
-    Serial.print("VSS: ");
-    Serial.println(speed);
-#endif
     BT.print(PREDKOSC);
     BT.print("41 0D " + String(speed, HEX));
   }
   else if (command.startsWith(THROTTLE)) {
     readThrottleBrake();
-#ifdef DEBUG
-    // throttlePos = random(0, 100);
-    Serial.print("TPS: ");
-    Serial.println(throttlePos);
-#endif
     BT.print(THROTTLE);
     BT.print("41 11 " + String((throttlePos * 255) / 100, HEX));
   }
 
+  else if (command.startsWith(BRAKE)) {
+    readThrottleBrake();
+    BT.print(BRAKE);
+    BT.print("41 13 " + String(brake, HEX));
+  }
+
+  else if (command.startsWith(GEAR)) {
+    gearRead();
+    BT.print(GEAR);
+    BT.print("41 0F " + String(gear + 40, HEX));
+  }
+
+  else if (command.startsWith(VTEC)) {
+    BT.print(VTEC);
+    BT.print("41 05 " + String(digitalRead(VTECPin) + 40, HEX));
+  }
+
   BT.print(LF);
   BT.print(PROMPT);
-
-
 }
 
 /**
-  List all the sensors to the app
+   List all the sensors to the app
 */
 void showSensorDefinitions() {
   int id = 0;
@@ -283,18 +294,16 @@ void showSensorDefinitions() {
 }
 
 /**
-  Dump sensor information for input sensors.
+   Dump sensor information for input sensors.
 
-  Format to Torque is id:type:value
+   Format to Torque is id:type:value
 */
 void getSensorValues() {
   noInterrupts();
-#ifdef RandomDebug
-  speed = random(0, 200);
-  rpm = random(0, 9000);
-  gear = random(0, 5);
-  throttlePos = random(0, 100);
-#endif
+  // speed = random(0, 200);
+  // rpm = random(0, 9000);
+  //gear = random(0, 5);
+  //throttlePos = random(0, 100);
 
   readThrottleBrake();
   gearRead();
@@ -306,10 +315,10 @@ void getSensorValues() {
     boolean isOutput = sensors[group + 2].equals(IS_OUTPUT);
 
 #ifdef DEBUG
-    Serial.println(SENSORSSIZE);
-    Serial.println(group);
-    Serial.println(id);
-    Serial.println("**********************");
+    /*    Serial.println(SENSORSSIZE);
+        Serial.println(group);
+        Serial.println(id);
+        Serial.println("**********************");*/
 #endif
     // ****************************
     // Speed
@@ -381,8 +390,8 @@ void getSensorValues() {
         BT.print(type);
         BT.print(":");
         if (type.equals(ANALOG)) {
-          //   Serial.print("gear = ");
-          //   Serial.println(gear);
+          Serial.print(".");//gear = ");
+          //  Serial.println(gear);
           BT.print(gear);
         } else if (type.equals(DIGITAL)) {
           BT.print(digitalRead(id));
@@ -423,9 +432,7 @@ void getSensorValues() {
         if (type.equals(ANALOG)) {
           BT.print(analogRead(id));
         } else if (type.equals(DIGITAL)) {
-          //   Serial.print("VTEC = ");
-          //   Serial.println(digitalRead(id));
-          BT.print(digitalRead(id));
+          BT.print(digitalRead(VTECPin));
         }
         BT.print('\n');
       }
@@ -436,7 +443,7 @@ void getSensorValues() {
 }
 
 /**
-  Sets a sensors value
+   Sets a sensors value
 */
 void setSensorValue(String command) {
   int index = command.indexOf(":");
@@ -464,7 +471,7 @@ void setSensorValue(String command) {
 }
 
 /**
-  Init the sensor definitions (input/output, default output states, etc)
+    Init the sensor definitions (input/output, default output states, etc)
 */
 void initSensors() {
   for (int i = 0; i < SENSORSSIZE / 9; i++) {
@@ -566,7 +573,6 @@ void speedRead() {
   interrupts();
 }
 
-
 // *********************************************************************
 //        odczyt aktualnego biegu na podstawie rpm i prędkości
 // *********************************************************************
@@ -575,8 +581,8 @@ void gearRead() {
   gear = rpm / speed;
 
 #ifdef DEBUG
-  Serial.print ("rpm / speed = ");
-  Serial.println (gear);
+  //  Serial.print ("rpm / speed = ");
+  //  Serial.println (gear);
 #endif
 
   if      (gear >= wspgear1 - tolgear && gear <= wspgear1 + tolgear) gear = 1;
@@ -587,8 +593,8 @@ void gearRead() {
   else gear = 0;
 
 #ifdef DEBUG
-  Serial.print ("gear = ");
-  Serial.println (gear);
+  //  Serial.print ("gear = ");
+  //  Serial.println (gear);
 #endif
 }
 
@@ -596,19 +602,21 @@ void gearRead() {
 //                 Odczyt pozycji przepustnicy
 // *********************************************************************
 void readThrottleBrake() {
-  if (analogRead(ThrottlePin) < minThrottlePos) {
-    minThrottlePos = analogRead(ThrottlePin) - 3;
+  throttlePos = map(analogRead(ThrottlePin), 135, 1023, 0, 100);
+  if (analogRead(ThrottlePin) < 135) {
+    throttlePos = 0;
   }
-  throttlePos = map(analogRead(ThrottlePin), minThrottlePos, 1023, 0, 100);
-
   brake = digitalRead(brakePin);
 #ifdef DEBUG
-  Serial.print ("AnalogRead Throttle = ");  Serial.println (analogRead(ThrottlePin));
-  Serial.print ("throttlePos = ");  Serial.print (throttlePos);  Serial.println ("%");
-  Serial.print ("brake = ");  Serial.println (brake);
+  /*  Serial.print ("AnalogRead Throttle = ");
+    Serial.print (analogRead(ThrottlePin));
+    Serial.print ("throttlePos = ");
+    Serial.print (throttlePos);
+    Serial.println ("%");
+    Serial.print ("brake = ");
+    Serial.println (brake);*/
 #endif
 }
-
 
 
 // *********************************************************************
