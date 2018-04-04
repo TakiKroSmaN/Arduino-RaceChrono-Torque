@@ -1,5 +1,4 @@
 #include <String.h>
-//#include <Wire.h>
 
 // #define DEBUG  // zakomentować w gotowym projekcie
 #define BT Serial1
@@ -52,7 +51,6 @@ String fromTorque = "";
 #define ShaftSensor            3
 #define clutch                 7
 #define brakePin               8
-#define flashToPassPin        14
 #define VTECPin               16
 #define ThrottlePin           A0
 
@@ -146,7 +144,6 @@ void setup() {
   pinMode(ShaftSensor, INPUT);
   pinMode(clutch, INPUT);
   pinMode(brakePin, INPUT);
-  pinMode(flashToPassPin, OUTPUT);
   pinMode(VTECPin, INPUT);
   pinMode(ThrottlePin, INPUT);
 
@@ -602,19 +599,16 @@ void gearRead() {
 //                 Odczyt pozycji przepustnicy
 // *********************************************************************
 void readThrottleBrake() {
-  throttlePos = map(analogRead(ThrottlePin), 135, 1023, 0, 100);
-  if (analogRead(ThrottlePin) < 135) {
-    throttlePos = 0;
+  if (analogRead(ThrottlePin) < minThrottlePos) {
+    minThrottlePos = analogRead(ThrottlePin) - 2;
   }
+  throttlePos = map(analogRead(ThrottlePin), minThrottlePos, 1023, 0, 100);
+
   brake = digitalRead(brakePin);
 #ifdef DEBUG
-  /*  Serial.print ("AnalogRead Throttle = ");
-    Serial.print (analogRead(ThrottlePin));
-    Serial.print ("throttlePos = ");
-    Serial.print (throttlePos);
-    Serial.println ("%");
-    Serial.print ("brake = ");
-    Serial.println (brake);*/
+  Serial.print ("AnalogRead Throttle = ");  Serial.println (analogRead(ThrottlePin));
+  Serial.print ("throttlePos = ");  Serial.print (throttlePos);  Serial.println ("%");
+  Serial.print ("brake = ");  Serial.println (brake);
 #endif
 }
 
